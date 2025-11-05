@@ -16,10 +16,11 @@ import (
 func main() {
 	const AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	fmt.Println(AGENT)
-	err := Scrape("https://gowebexamples.com/basic-middleware/", AGENT)
+	err := Scrape("https://en.wikipedia.org/wiki/George_Washington", AGENT)
 	if err != nil {
 		log.Println(err)
 	}
+
 }
 
 func Scrape(Url string, agent string) error {
@@ -40,10 +41,12 @@ func Scrape(Url string, agent string) error {
 	z := html.NewTokenizer(resp.Body)
 	buf := &bytes.Buffer{}
 	type state struct {
-		skip  bool
-		depth int
+		skip   bool
+		depth  int
+		texton bool
 	}
-	token_state := state{}
+	var wordsSoFar int
+	token_state := state{false, 0, true}
 	for {
 		tt := z.Next()
 		switch tt {
@@ -77,6 +80,9 @@ func Scrape(Url string, agent string) error {
 				token_state.depth--
 			}
 		case html.TextToken:
+			if !token_state.texton {
+				continue
+			}
 			if token_state.skip && token_state.depth > 0 {
 				continue
 			}
@@ -85,9 +91,10 @@ func Scrape(Url string, agent string) error {
 				buf.Write([]byte(t))
 				buf.Write([]byte(" "))
 			}
-			if len(strings.Fields(buf.String())) > 800 {
-				fmt.Println("Content: ", buf.String())
-				return nil
+			wordsSoFar += len(strings.Fields(t))
+			if wordsSoFar > 800 {
+				fmt.Println(buf.String())
+				token_state.texton = false
 			}
 		}
 	}
