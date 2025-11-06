@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -56,17 +57,18 @@ func main() {
 	}(queue, discovery)
 
 	entries := make(chan page, 2000)
-	go func(en chan page) {
-		for e := range en {
-			statement := `
+	go func(en chan page, db *sql.DB) {
+		statement := `
 			INSERT INTO pages (url, content)
-			VALUES ($1 $2)`
-			_, err = db.Exec(statement, e.url, e.content)
+			VALUES ($1, $2)
+			ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, crawled_at = NOW()`
+		for e := range en {
+			_, err := db.Exec(statement, e.url, e.content)
 			if err != nil {
 				log.Println("Error adding url:", e.url, "into postgres")
 			}
 		}
-	}(entries)
+	}(entries, db)
 	for i := range *workers {
 		go func(q chan string, d chan string, e chan page, id int) {
 			for job := range q {
@@ -75,7 +77,27 @@ func main() {
 		}(queue, discovery, entries, i+1)
 	}
 	for {
-		time.Sleep(time.Second * 100)
+		time.Sleep(time.Second * 15)
+		rows, err := db.Query("SELECT url, crawled_at from pages")
+		if err != nil {
+			log.Println("Error getting entries:", err)
+		}
+		defer rows.Close()
+		var url string
+		var crawled_at time.Time
+		logFile, err := os.OpenFile("db.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println("Error logging contents")
+		}
+		defer logFile.Close()
+		log.SetOutput(logFile)
+		for rows.Next() {
+			if err = rows.Scan(&url, &crawled_at); err != nil {
+				log.Println("Error scanning db rows:", err)
+			}
+			log.Println("db dump: -url:", url, "-crawled_at:", crawled_at)
+
+		}
 	}
 }
 
