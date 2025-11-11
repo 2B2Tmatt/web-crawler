@@ -47,7 +47,10 @@ func main() {
 
 	queue := make(chan string, 2000)
 	discovery := make(chan string, 2000)
-	workers := flag.Int("w", 1, "num web crawlers")
+	entries := make(chan page, 2000)
+	defer close(entries)
+
+	workers := flag.Int("w", 20, "num web crawlers")
 	duration := flag.Int("d", 20, "duration of crawling")
 	verbose := flag.Bool("v", false, "explicit logs")
 	output := flag.String("o", "db.log", "redirect logs")
@@ -64,13 +67,20 @@ func main() {
 	discovery <- flag.Args()[0]
 
 	var wg sync.WaitGroup
-	go func(q chan string, d chan string) {
-		for job := range d {
-			q <- job
-		}
-	}(queue, discovery)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*duration)*time.Second)
+	defer cancel()
 
-	entries := make(chan page, 2000)
+	go func(q chan string, d chan string, ctx context.Context) {
+		for {
+			select {
+			case <-ctx.Done():
+				close(q)
+				return
+			case job := <-d:
+				q <- job
+			}
+		}
+	}(queue, discovery, ctx)
 
 	go func(en chan page, db *sql.DB) {
 		statement := `
@@ -84,32 +94,29 @@ func main() {
 			}
 		}
 	}(entries, db)
-
+	client := &http.Client{}
 	for i := range *workers {
 		wg.Add(1)
-		go func(id int, q chan string, d chan string, e chan page, db *sql.DB) {
+		go func(ctx context.Context, client *http.Client, id int, q chan string, d chan string, e chan page, db *sql.DB) {
 			defer wg.Done()
 			for job := range q {
-				err = Scrape(id, job, AGENT, d, e, db, *verbose)
+				err = Scrape(ctx, client, id, job, AGENT, d, e, db, *verbose)
 				if err != nil {
 					log.Println(err)
 				}
 			}
-		}(i+1, queue, discovery, entries, db)
+		}(ctx, client, i+1, queue, discovery, entries, db)
 	}
-	time.Sleep(time.Second * time.Duration(*duration))
-	close(entries)
-	close(queue)
-	close(discovery)
 	wg.Wait()
+
 	fmt.Println("Crawling finished")
 }
 
-func Scrape(id int, Url string, agent string, d chan<- string, e chan page, db *sql.DB, v bool) error {
+func Scrape(ctx context.Context, client *http.Client, id int, Url string, agent string, d chan<- string, e chan page, db *sql.DB, v bool) error {
 	if v {
 		fmt.Println("Waiting on robots.txt.. Worker", id)
 	}
-	err := robots(Url, agent)
+	err := robots(ctx, client, Url, agent)
 	if err != nil {
 		return err
 	}
@@ -120,12 +127,15 @@ func Scrape(id int, Url string, agent string, d chan<- string, e chan page, db *
 	if err != nil {
 		return err
 	}
+	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	req, err := http.NewRequest(http.MethodGet, Url, nil)
 	if err != nil {
 		return err
 	}
+	req = req.WithContext(childCtx)
 	req.Header.Set("User-agent", agent)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -169,6 +179,8 @@ func Scrape(id int, Url string, agent string, d chan<- string, e chan page, db *
 							continue
 						}
 						select {
+						case <-ctx.Done():
+							return nil
 						case d <- u.String():
 							if v {
 								fmt.Println("Sent successfully: -url:", u.String())
@@ -215,7 +227,7 @@ func Scrape(id int, Url string, agent string, d chan<- string, e chan page, db *
 	}
 }
 
-func robots(Url string, agent string) error {
+func robots(ctx context.Context, client *http.Client, Url string, agent string) error {
 	parsedURL, err := url.Parse(Url)
 	if err != nil {
 		return err
@@ -224,7 +236,14 @@ func robots(Url string, agent string) error {
 	if parsedURL.RawQuery != "" {
 		rq += "?" + parsedURL.RawQuery
 	}
-	resp, err := http.Get(parsedURL.Scheme + "://" + parsedURL.Host + "/robots.txt")
+	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequest(http.MethodGet, parsedURL.Scheme+"://"+parsedURL.Host+"/robots.txt", nil)
+	if err != nil {
+		return err
+	}
+	req = req.WithContext(childCtx)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
