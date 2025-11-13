@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	rl "web-crawler/utils"
+	"web-crawler/utils"
 
 	_ "github.com/lib/pq"
 	"github.com/temoto/robotstxt"
@@ -26,11 +26,22 @@ type page struct {
 	content string
 }
 
+type dep struct {
+	rateLimiter *utils.RateLimiter
+	urlStore    *utils.UrlMemory
+	domainCache *utils.DomainCache
+	database    *sql.DB
+	verbose     bool
+	agent       string
+	client      *http.Client
+}
+
 func main() {
 	const AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	fmt.Println(AGENT)
 
-	RateLimiter := rl.InitRL()
+	rateLimiter := utils.InitRL()
+	domainCache, urlStore := utils.InitStore()
 
 	dbUrl := "postgres://postgres:postgres@localhost:5431/pages?sslmode=disable"
 	db, err := sql.Open("postgres", dbUrl)
@@ -95,42 +106,64 @@ func main() {
 			if err != nil {
 				log.Println("Error adding url:", e.url, "into postgres:", err)
 			}
+			if *verbose {
+				fmt.Println("db: -url added:", e.url)
+			}
+			log.Println("db: -url added:", e.url)
 		}
 	}(entries, db)
 	client := &http.Client{}
+	deps := dep{rateLimiter, urlStore, domainCache, db, *verbose, AGENT, client}
+
 	for i := range *workers {
 		wg.Add(1)
-		go func(ctx context.Context, client *http.Client, id int, q chan string, d chan string, e chan page, db *sql.DB) {
+		go func(ctx context.Context, id int, q chan string, d chan string, e chan page, deps dep) {
 			defer wg.Done()
 			for job := range q {
-				err = Scrape(ctx, client, RateLimiter, id, job, AGENT, d, e, db, *verbose)
+				err = Scrape(ctx, id, job, d, e, deps)
 				if err != nil {
 					log.Println(err)
 				}
 			}
-		}(ctx, client, i+1, queue, discovery, entries, db)
+		}(ctx, i+1, queue, discovery, entries, deps)
 	}
 	wg.Wait()
 
 	fmt.Println("Crawling finished")
 }
 
-func Scrape(ctx context.Context, client *http.Client, rl *rl.RateLimiter, id int, Url string, agent string, d chan<- string, e chan page, db *sql.DB, v bool) error {
-	if v {
-		fmt.Println("Waiting on robots.txt.. Worker", id)
-	}
-	err := robots(ctx, client, Url, agent)
-	if err != nil {
-		return err
-	}
-	if v {
-		fmt.Println("Robots allowed... Worker", id)
-	}
+func Scrape(ctx context.Context, id int, Url string,
+	d chan<- string, e chan page, deps dep) error {
+
 	base, err := url.Parse(Url)
 	if err != nil {
 		return err
 	}
 	host := base.Host
+	if deps.verbose {
+		fmt.Println("Waiting on robots.txt.. Worker", id)
+	}
+	allowed, exists := deps.domainCache.CheckExisting(host)
+	if !exists {
+		err = robots(ctx, deps.client, Url, deps.agent)
+		if err != nil {
+			log.Println("cache: -restricted domain:", host)
+			deps.domainCache.Add(host, false)
+			return err
+		}
+		deps.domainCache.Add(host, true)
+		log.Println("cache: -allowed domain:", host)
+	} else {
+		if !allowed {
+			return errors.New("honoring robots.txt")
+		}
+		log.Println("cache: -used -domain:", host)
+	}
+
+	if deps.verbose {
+		fmt.Println("Robots allowed... Worker", id)
+	}
+
 	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequest(http.MethodGet, Url, nil)
@@ -138,12 +171,12 @@ func Scrape(ctx context.Context, client *http.Client, rl *rl.RateLimiter, id int
 		return err
 	}
 	req = req.WithContext(childCtx)
-	req.Header.Set("User-agent", agent)
-	err = rl.Acquire(ctx, host)
+	req.Header.Set("User-agent", deps.agent)
+	err = deps.rateLimiter.Acquire(ctx, host)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
+	resp, err := deps.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -177,7 +210,7 @@ func Scrape(ctx context.Context, client *http.Client, rl *rl.RateLimiter, id int
 						fmt.Println("Link:", u)
 						check := `SELECT EXISTS (SELECT 1 from pages WHERE url=$1)`
 						var exists bool
-						err = db.QueryRow(check, u.String()).Scan(&exists)
+						err = deps.database.QueryRow(check, u.String()).Scan(&exists)
 						if err != nil {
 							log.Println("error checking link existence, -link:", u)
 							return err
@@ -190,7 +223,7 @@ func Scrape(ctx context.Context, client *http.Client, rl *rl.RateLimiter, id int
 						case <-ctx.Done():
 							return nil
 						case d <- u.String():
-							if v {
+							if deps.verbose {
 								fmt.Println("Sent successfully: -url:", u.String())
 							}
 							log.Println("Sent successfully: -url:", u.String())
