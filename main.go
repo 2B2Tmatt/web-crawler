@@ -208,17 +208,26 @@ func Scrape(ctx context.Context, id int, Url string,
 						}
 						u := base.ResolveReference(r)
 						fmt.Println("Link:", u)
-						check := `SELECT EXISTS (SELECT 1 from pages WHERE url=$1)`
-						var exists bool
-						err = deps.database.QueryRow(check, u.String()).Scan(&exists)
-						if err != nil {
-							log.Println("error checking link existence, -link:", u)
-							return err
-						}
-						if exists {
-							log.Println("url exists, -link:", u, "going ahead")
+
+						prior := deps.urlStore.CheckExisting(u.String())
+						if !prior {
+							var exists bool
+							check := `SELECT EXISTS (SELECT 1 from pages WHERE url=$1)`
+							err = deps.database.QueryRow(check, u.String()).Scan(&exists)
+							if err != nil {
+								log.Println("error checking link existence, -link:", u)
+								return err
+							}
+							deps.urlStore.Add(u.String())
+							if exists {
+								log.Println("url exists, -link:", u, "going to the next token")
+								continue
+							}
+						} else {
+							log.Println("url exists -link:", u, "going to the next token -cache used")
 							continue
 						}
+
 						select {
 						case <-ctx.Done():
 							return nil
