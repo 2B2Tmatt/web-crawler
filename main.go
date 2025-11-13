@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	rl "web-crawler/utils"
 
 	_ "github.com/lib/pq"
 	"github.com/temoto/robotstxt"
@@ -28,6 +29,8 @@ type page struct {
 func main() {
 	const AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	fmt.Println(AGENT)
+
+	RateLimiter := rl.InitRL()
 
 	dbUrl := "postgres://postgres:postgres@localhost:5431/pages?sslmode=disable"
 	db, err := sql.Open("postgres", dbUrl)
@@ -100,7 +103,7 @@ func main() {
 		go func(ctx context.Context, client *http.Client, id int, q chan string, d chan string, e chan page, db *sql.DB) {
 			defer wg.Done()
 			for job := range q {
-				err = Scrape(ctx, client, id, job, AGENT, d, e, db, *verbose)
+				err = Scrape(ctx, client, RateLimiter, id, job, AGENT, d, e, db, *verbose)
 				if err != nil {
 					log.Println(err)
 				}
@@ -112,7 +115,7 @@ func main() {
 	fmt.Println("Crawling finished")
 }
 
-func Scrape(ctx context.Context, client *http.Client, id int, Url string, agent string, d chan<- string, e chan page, db *sql.DB, v bool) error {
+func Scrape(ctx context.Context, client *http.Client, rl *rl.RateLimiter, id int, Url string, agent string, d chan<- string, e chan page, db *sql.DB, v bool) error {
 	if v {
 		fmt.Println("Waiting on robots.txt.. Worker", id)
 	}
@@ -127,6 +130,7 @@ func Scrape(ctx context.Context, client *http.Client, id int, Url string, agent 
 	if err != nil {
 		return err
 	}
+	host := base.Host
 	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequest(http.MethodGet, Url, nil)
@@ -135,6 +139,10 @@ func Scrape(ctx context.Context, client *http.Client, id int, Url string, agent 
 	}
 	req = req.WithContext(childCtx)
 	req.Header.Set("User-agent", agent)
+	err = rl.Acquire(ctx, host)
+	if err != nil {
+		return err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -186,11 +194,6 @@ func Scrape(ctx context.Context, client *http.Client, id int, Url string, agent 
 								fmt.Println("Sent successfully: -url:", u.String())
 							}
 							log.Println("Sent successfully: -url:", u.String())
-						default:
-							if v {
-								fmt.Println("Channel full, moving ahead")
-							}
-							log.Println("Channel full, moving ahead")
 						}
 					}
 				}
