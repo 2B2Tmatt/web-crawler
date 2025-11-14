@@ -21,7 +21,7 @@ type RateLimiter struct {
 }
 
 func InitRL() *RateLimiter {
-	return &RateLimiter{make(map[string]*Gate), sync.Mutex{}, time.Second}
+	return &RateLimiter{make(map[string]*Gate), sync.Mutex{}, 300 * time.Millisecond}
 }
 
 func (rl *RateLimiter) Acquire(ctx context.Context, host string) error {
