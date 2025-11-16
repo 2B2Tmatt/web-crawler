@@ -135,7 +135,7 @@ func main() {
 	fmt.Println("    - new links found 					   	:", stats.DiscoveredNew())
 	fmt.Println()
 
-	fmt.Println("URLS SKIPPED             					:", stats.UrlsSkipped())
+	fmt.Println("URLS SKIPPED             					:")
 	fmt.Println("    - already in cache   					:", stats.SkippedCached())
 	fmt.Println()
 
@@ -159,31 +159,31 @@ func Scrape(ctx context.Context, id int, Url string,
 		return err
 	}
 	host := base.Host
-	if deps.verbose {
-		fmt.Println("Waiting on robots.txt.. Worker", id)
-	}
-	allowed, exists := deps.domainCache.CheckExisting(host)
-	if !exists {
-		err = robots(ctx, deps.client, Url, deps.agent, s)
-		if err != nil {
-			log.Println("cache: -restricted domain:", host)
-			deps.domainCache.Add(host, false)
-			return err
-		}
-		deps.domainCache.Add(host, true)
-		log.Println("cache: -allowed domain:", host)
-	} else {
-		if !allowed {
-			s.IncErrorTotal()
-			s.IncErrorRobots()
-			return errors.New("honoring robots.txt")
-		}
-		log.Println("cache: -used -domain:", host)
-	}
+	// if deps.verbose {
+	// 	fmt.Println("Waiting on robots.txt.. Worker", id)
+	// }
+	// allowed, exists := deps.domainCache.CheckExisting(host)
+	// if !exists {
+	// 	err = robots(ctx, deps.client, Url, deps.agent, s)
+	// 	if err != nil {
+	// 		log.Println("cache: -restricted domain:", host)
+	// 		deps.domainCache.Add(host, false)
+	// 		return err
+	// 	}
+	// 	deps.domainCache.Add(host, true)
+	// 	log.Println("cache: -allowed domain:", host)
+	// } else {
+	// 	if !allowed {
+	// 		s.IncErrorTotal()
+	// 		s.IncErrorRobots()
+	// 		return errors.New("honoring robots.txt")
+	// 	}
+	// 	log.Println("cache: -used -domain:", host)
+	// }
 
-	if deps.verbose {
-		fmt.Println("Robots allowed... Worker", id)
-	}
+	// if deps.verbose {
+	// 	fmt.Println("Robots allowed... Worker", id)
+	// }
 
 	childCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -244,7 +244,6 @@ func Scrape(ctx context.Context, id int, Url string,
 							deps.urlStore.Add(u.String())
 						} else {
 							log.Println("url exists -link:", u, "going to the next token -cache used")
-							s.IncUrlsSkipped()
 							s.IncSkippedCached()
 							continue
 						}
@@ -400,9 +399,6 @@ func (ss *sessionStatistics) IncDiscoveredNew() {
 
 func (ss *sessionStatistics) UrlsSkipped() uint64 {
 	return atomic.LoadUint64(&ss.urlsSkipped)
-}
-func (ss *sessionStatistics) IncUrlsSkipped() {
-	atomic.AddUint64(&ss.urlsSkipped, 1)
 }
 func (ss *sessionStatistics) SkippedCached() uint64 {
 	return atomic.LoadUint64(&ss.skippedCached)
