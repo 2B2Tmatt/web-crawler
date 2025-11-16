@@ -84,10 +84,10 @@ func main() {
 			}
 		}
 	}(queue, discovery, ctx)
-	for range 10 {
+	for range 2 {
 		go func(en chan page, db *sql.DB, s *sessionStatistics) {
 			statement := `
-			INSERT INTO pages (url, content)
+			INSERT INTO search_docs (url, content)
 			VALUES ($1, $2)
 			ON CONFLICT (url) DO UPDATE SET content = EXCLUDED.content, crawled_at = NOW()`
 			for e := range en {
@@ -283,7 +283,7 @@ func Scrape(ctx context.Context, id int, Url string,
 				continue
 			}
 			t := strings.TrimSpace(z.Token().Data)
-			if len(t) > 0 && !strings.Contains(t, "<iframe") {
+			if len(t) > 0 && !strings.Contains(t, "<iframe") && !strings.Contains(t, "<style") {
 				buf.Write([]byte(t))
 				buf.Write([]byte(" "))
 			}
@@ -338,14 +338,38 @@ func robots(ctx context.Context, client *http.Client, Url string, agent string, 
 
 func initDB(ctx context.Context, db *sql.DB) error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS pages(
-		url TEXT PRIMARY KEY, 
-		content TEXT, 
-		crawled_at TIMESTAMPTZ DEFAULT NOW()
-	);`
+	CREATE TABLE IF NOT EXISTS search_docs (
+    id SERIAL PRIMARY KEY,
+    url TEXT UNIQUE NOT NULL,
+    content TEXT NOT NULL,
+    content_tsv tsvector NOT NULL,
+    crawled_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+	CREATE OR REPLACE FUNCTION update_tsvector()
+	RETURNS trigger AS $$
+	BEGIN
+    NEW.content_tsv := to_tsvector('english', NEW.content);
+    RETURN NEW;
+	END
+	$$ LANGUAGE plpgsql;
+
+	CREATE TRIGGER trg_search_docs_tsv
+	BEFORE INSERT OR UPDATE ON search_docs
+	FOR EACH ROW
+	EXECUTE FUNCTION update_tsvector();
+
+-- GIN index for fast full-text search
+CREATE INDEX IF NOT EXISTS idx_search_docs_content_tsv
+ON search_docs
+USING GIN (content_tsv);
+`
 
 	_, err := db.ExecContext(ctx, schema)
 	if err != nil {
+		if strings.Contains(err.Error(), "already exists"){
+			return nil
+		}
 		return err
 	}
 	return nil
